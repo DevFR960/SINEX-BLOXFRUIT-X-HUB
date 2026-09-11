@@ -378,7 +378,7 @@ local function GetQuestNPC()
             return {NPC = "Labyrinth Quest Giver 3", Enemy = "Labyrinth Minotaur", Level = 2400}
         elseif playerLevel >= 2425 and playerLevel <= 2449 then
             return {NPC = "Tiki Quest Giver", Enemy = "Tiki Villager", Level = 2425}
-elseif playerLevel >= 2450 and playerLevel <= 2474 then
+        elseif playerLevel >= 2450 and playerLevel <= 2474 then
             return {NPC = "Tiki Quest Giver 2", Enemy = "Tiki Warrior", Level = 2450}
         elseif playerLevel >= 2475 and playerLevel <= 2499 then
             return {NPC = "Tiki Quest Giver 3", Enemy = "Tiki Elite", Level = 2475}
