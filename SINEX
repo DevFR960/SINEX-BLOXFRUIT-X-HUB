@@ -1,0 +1,802 @@
+--// Services
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualUser = game:GetService("VirtualUser")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+--// Player
+local Player = Players.LocalPlayer
+local Character = Player.Character or Player.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local RootPart = Character:WaitForChild("HumanoidRootPart")
+
+--// Game Data
+local MAX_LEVEL = 3000
+local BASE_LEVEL_CAP = 2800
+local SECRET_LEVELS = 200
+
+--// Settings
+getgenv().Settings = {
+    -- Main
+    AutoFarm = false,
+    FarmMode = "Level", -- Level, Boss, Mastery, Chest
+    SelectedWeapon = "Melee",
+    FastAttack = true,
+
+    -- Farm Settings
+    AutoQuest = true,
+    AutoCollectChests = false,
+    ChestDelay = 3,
+    FarmRadius = 50,
+
+    -- Safety
+    AntiAFK = true,
+    AutoRejoin = true,
+    RejoinDelay = 300, -- 5 minutes
+    AntiDetect = true,
+
+    -- Stats
+    AutoStats = false,
+    StatMode = "Melee", -- Melee, Defense, Sword, Gun, Blox Fruit
+
+    -- Webhook
+    WebhookEnabled = false,
+    WebhookURL = "",
+
+    -- Island Secrets
+    TrackSecrets = true,
+    AutoSecretQuest = false,
+}
+
+--// Variables
+local FarmConnection = nil
+local CurrentTarget = nil
+local FarmStartTime = tick()
+local TotalKills = 0
+local TotalLevels = 0
+
+--// Luna Interface Suite
+local Luna = loadstring(game:HttpGet("https://raw.githubusercontent.com/NebulaHubOne/Luna-Interface-Suite/main/source.lua"))()
+
+--// Create Window
+local Window = Luna:CreateWindow({
+    Name = "Blox Fruits Auto Farm | Max Level: " .. MAX_LEVEL,
+    Subtitle = "Luna Interface Suite",
+    LogoID = "rbxassetid://7743878358",
+    LoadingEnabled = true,
+    LoadingTitle = "Loading Blox Fruits Auto Farm",
+    LoadingSubtitle = "By Luna Interface",
+    ConfigSettings = {
+        RootFolder = "BloxFruitsAutoFarm",
+        ConfigFolder = "Configs"
+    },
+    KeySystem = false
+})
+
+--// Create Tabs
+local MainTab = Window:CreateTab("Main", "home")
+local FarmTab = Window:CreateTab("Farm", "sword")
+local StatsTab = Window:CreateTab("Stats", "chart")
+local MiscTab = Window:CreateTab("Misc", "settings")
+local SecretTab = Window:CreateTab("Secrets", "star")
+
+--// Notification
+Luna:Notification({
+    Title = "Script Loaded",
+    Content = "Blox Fruits Auto Farm v3.0 | Max Level: " .. MAX_LEVEL,
+    Image = "rbxassetid://7743878358",
+    Time = 5
+})
+
+--// Utility Functions
+local function GetPlayerLevel()
+    local level = Player:FindFirstChild("Data") and Player.Data:FindFirstChild("Level")
+    return level and level.Value or 0
+end
+
+local function GetPlayerMoney()
+    local money = Player:FindFirstChild("Data") and Player.Data:FindFirstChild("Money")
+    return money and money.Value or 0
+end
+
+local function GetCurrentSea()
+    local placeId = game.PlaceId
+    if placeId == 2753915549 then return "First Sea"
+    elseif placeId == 4442272183 then return "Second Sea"
+    elseif placeId == 7449423635 then return "Third Sea"
+    end
+    return "Unknown"
+end
+
+local function SendWebhook(title, message)
+    if not getgenv().Settings.WebhookEnabled or getgenv().Settings.WebhookURL == "" then return end
+
+    local data = {
+        ["embeds"] = {{
+            ["title"] = title,
+            ["description"] = message,
+            ["color"] = 5814783,
+            ["fields"] = {
+                {["name"] = "Level", ["value"] = tostring(GetPlayerLevel()), ["inline"] = true},
+                {["name"] = "Money", ["value"] = tostring(GetPlayerMoney()), ["inline"] = true},
+                {["name"] = "Sea", ["value"] = GetCurrentSea(), ["inline"] = true},
+                {["name"] = "Kills", ["value"] = tostring(TotalKills), ["inline"] = true},
+                {["name"] = "Runtime", ["value"] = tostring(math.floor(tick() - FarmStartTime)) .. "s", ["inline"] = true}
+            },
+            ["footer"] = {["text"] = "Blox Fruits Auto Farm | " .. os.date("%Y-%m-%d %H:%M:%S")}
+        }}
+    }
+
+    local success, err = pcall(function()
+        HttpService:PostAsync(getgenv().Settings.WebhookURL, HttpService:JSONEncode(data))
+    end)
+
+    if not success then
+        warn("Webhook Error: " .. tostring(err))
+    end
+end
+
+--// Anti-AFK
+if getgenv().Settings.AntiAFK then
+    Player.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+        Luna:Notification({
+            Title = "Anti-AFK",
+            Content = "Prevented AFK kick",
+            Time = 2
+        })
+    end)
+end
+
+--// Auto Rejoin
+if getgenv().Settings.AutoRejoin then
+    task.spawn(function()
+        while true do
+            task.wait(getgenv().Settings.RejoinDelay)
+            if getgenv().Settings.AutoFarm then
+                Luna:Notification({
+                    Title = "Auto Rejoin",
+                    Content = "Rejoining server to prevent detection...",
+                    Time = 5
+                })
+                task.wait(2)
+                TeleportService:Teleport(game.PlaceId, Player)
+            end
+        end
+    end)
+end
+
+--// Get Closest Enemy
+local function GetClosestEnemy(maxLevel)
+    local closest = nil
+    local closestDistance = math.huge
+
+    for _, enemy in pairs(Workspace.Enemies:GetChildren()) do
+        if enemy:FindFirstChild("Humanoid") and enemy:FindFirstChild("HumanoidRootPart") then
+            if enemy.Humanoid.Health > 0 then
+                local enemyLevel = enemy:FindFirstChild("Level") and enemy.Level.Value or 0
+                if enemyLevel <= (maxLevel or GetPlayerLevel() + 50) then
+                    local distance = (RootPart.Position - enemy.HumanoidRootPart.Position).Magnitude
+                    if distance < closestDistance then
+                        closest = enemy
+                        closestDistance = distance
+                    end
+                end
+            end
+        end
+    end
+
+    return closest
+end
+
+--// Get Quest NPC
+local function GetQuestNPC()
+    local sea = GetCurrentSea()
+    local playerLevel = GetPlayerLevel()
+
+    -- First Sea Quests
+    if sea == "First Sea" then
+        if playerLevel >= 1 and playerLevel <= 9 then
+            return {NPC = "Bandit Quest Giver", Enemy = "Bandit", Level = 1}
+        elseif playerLevel >= 10 and playerLevel <= 14 then
+            return {NPC = "Monkey Quest Giver", Enemy = "Monkey", Level = 10}
+        elseif playerLevel >= 15 and playerLevel <= 29 then
+            return {NPC = "Gorilla Quest Giver", Enemy = "Gorilla", Level = 20}
+        elseif playerLevel >= 30 and playerLevel <= 39 then
+            return {NPC = "Pirate Quest Giver", Enemy = "Pirate", Level = 30}
+        elseif playerLevel >= 40 and playerLevel <= 59 then
+            return {NPC = "Brute Quest Giver", Enemy = "Brute", Level = 40}
+        elseif playerLevel >= 60 and playerLevel <= 74 then
+            return {NPC = "Desert Quest Giver", Enemy = "Desert Bandit", Level = 60}
+        elseif playerLevel >= 75 and playerLevel <= 89 then
+            return {NPC = "Desert Quest Giver 2", Enemy = "Desert Officer", Level = 75}
+        elseif playerLevel >= 90 and playerLevel <= 99 then
+            return {NPC = "Snow Quest Giver", Enemy = "Snow Bandit", Level = 90}
+        elseif playerLevel >= 100 and playerLevel <= 119 then
+            return {NPC = "Snow Quest Giver 2", Enemy = "Snowman", Level = 100}
+        elseif playerLevel >= 120 and playerLevel <= 149 then
+            return {NPC = "Marine Quest Giver", Enemy = "Chief Petty Officer", Level = 120}
+        elseif playerLevel >= 150 and playerLevel <= 174 then
+            return {NPC = "Sky Quest Giver", Enemy = "Sky Bandit", Level = 150}
+        elseif playerLevel >= 175 and playerLevel <= 189 then
+            return {NPC = "Sky Quest Giver 2", Enemy = "Dark Master", Level = 175}
+        elseif playerLevel >= 190 and playerLevel <= 209 then
+            return {NPC = "Prison Quest Giver", Enemy = "Prisoner", Level = 190}
+        elseif playerLevel >= 210 and playerLevel <= 249 then
+            return {NPC = "Prison Quest Giver 2", Enemy = "Dangerous Prisoner", Level = 210}
+        elseif playerLevel >= 250 and playerLevel <= 274 then
+            return {NPC = "Colosseum Quest Giver", Enemy = "Toga Warrior", Level = 250}
+        elseif playerLevel >= 275 and playerLevel <= 299 then
+            return {NPC = "Colosseum Quest Giver 2", Enemy = "Gladiator", Level = 275}
+        elseif playerLevel >= 300 and playerLevel <= 324 then
+            return {NPC = "Magma Quest Giver", Enemy = "Military Soldier", Level = 300}
+        elseif playerLevel >= 325 and playerLevel <= 374 then
+            return {NPC = "Magma Quest Giver 2", Enemy = "Military Spy", Level = 325}
+        elseif playerLevel >= 375 and playerLevel <= 399 then
+            return {NPC = "Fishman Quest Giver", Enemy = "Fishman Warrior", Level = 375}
+        elseif playerLevel >= 400 and playerLevel <= 449 then
+            return {NPC = "Fishman Quest Giver 2", Enemy = "Fishman Commando", Level = 400}
+        elseif playerLevel >= 450 and playerLevel <= 474 then
+            return {NPC = "Sky Quest Giver 3", Enemy = "God's Guard", Level = 450}
+        elseif playerLevel >= 475 and playerLevel <= 524 then
+            return {NPC = "Sky Quest Giver 4", Enemy = "Shanda", Level = 475}
+        elseif playerLevel >= 525 and playerLevel <= 549 then
+            return {NPC = "Sky Quest Giver 5", Enemy = "Royal Squad", Level = 525}
+        elseif playerLevel >= 550 and playerLevel <= 624 then
+            return {NPC = "Sky Quest Giver 6", Enemy = "Royal Soldier", Level = 550}
+        elseif playerLevel >= 625 and playerLevel <= 649 then
+            return {NPC = "Fountain Quest Giver", Enemy = "Galley Pirate", Level = 625}
+        elseif playerLevel >= 650 and playerLevel <= 700 then
+            return {NPC = "Fountain Quest Giver 2", Enemy = "Galley Captain", Level = 650}
+        end
+    -- Second Sea Quests
+    elseif sea == "Second Sea" then
+        if playerLevel >= 700 and playerLevel <= 724 then
+            return {NPC = "Area 1 Quest Giver", Enemy = "Raider", Level = 700}
+        elseif playerLevel >= 725 and playerLevel <= 774 then
+            return {NPC = "Area 1 Quest Giver 2", Enemy = "Mercenary", Level = 725}
+        elseif playerLevel >= 775 and playerLevel <= 799 then
+            return {NPC = "Area 2 Quest Giver", Enemy = "Swan Pirate", Level = 775}
+        elseif playerLevel >= 800 and playerLevel <= 874 then
+            return {NPC = "Area 2 Quest Giver 2", Enemy = "Factory Staff", Level = 800}
+        elseif playerLevel >= 875 and playerLevel <= 899 then
+            return {NPC = "Marine Quest Giver 2", Enemy = "Marine Lieutenant", Level = 875}
+        elseif playerLevel >= 900 and playerLevel <= 949 then
+            return {NPC = "Marine Quest Giver 3", Enemy = "Marine Captain", Level = 900}
+        elseif playerLevel >= 950 and playerLevel <= 974 then
+            return {NPC = "Zombie Quest Giver", Enemy = "Zombie", Level = 950}
+        elseif playerLevel >= 975 and playerLevel <= 999 then
+            return {NPC = "Zombie Quest Giver 2", Enemy = "Vampire", Level = 975}
+        elseif playerLevel >= 1000 and playerLevel <= 1049 then
+            return {NPC = "Snow Mountain Quest Giver", Enemy = "Snow Trooper", Level = 1000}
+        elseif playerLevel >= 1050 and playerLevel <= 1099 then
+            return {NPC = "Snow Mountain Quest Giver 2", Enemy = "Winter Warrior", Level = 1050}
+        elseif playerLevel >= 1100 and playerLevel <= 1124 then
+            return {NPC = "Ice Quest Giver", Enemy = "Lab Subordinate", Level = 1100}
+        elseif playerLevel >= 1125 and playerLevel <= 1174 then
+            return {NPC = "Ice Quest Giver 2", Enemy = "Horned Warrior", Level = 1125}
+        elseif playerLevel >= 1175 and playerLevel <= 1199 then
+            return {NPC = "Ice Quest Giver 3", Enemy = "Smoke Admiral", Level = 1175}
+        elseif playerLevel >= 1200 and playerLevel <= 1249 then
+            return {NPC = "Ship Quest Giver", Enemy = "Ship Deckhand", Level = 1200}
+        elseif playerLevel >= 1250 and playerLevel <= 1274 then
+            return {NPC = "Ship Quest Giver 2", Enemy = "Ship Engineer", Level = 1250}
+        elseif playerLevel >= 1275 and playerLevel <= 1299 then
+            return {NPC = "Ship Quest Giver 3", Enemy = "Ship Steward", Level = 1275}
+        elseif playerLevel >= 1300 and playerLevel <= 1324 then
+            return {NPC = "Ship Quest Giver 4", Enemy = "Ship Officer", Level = 1300}
+        elseif playerLevel >= 1325 and playerLevel <= 1349 then
+            return {NPC = "Ship Quest Giver 5", Enemy = "Arctic Warrior", Level = 1325}
+        elseif playerLevel >= 1350 and playerLevel <= 1374 then
+            return {NPC = "Frost Quest Giver", Enemy = "Snow Lurker", Level = 1350}
+        elseif playerLevel >= 1375 and playerLevel <= 1424 then
+            return {NPC = "Frost Quest Giver 2", Enemy = "Arctic Mountaineer", Level = 1375}
+        elseif playerLevel >= 1425 and playerLevel <= 1449 then
+            return {NPC = "Forgotten Quest Giver", Enemy = "Ancient Zombie", Level = 1425}
+        elseif playerLevel >= 1450 and playerLevel <= 1474 then
+            return {NPC = "Forgotten Quest Giver 2", Enemy = "Ancient Vampire", Level = 1450}
+        elseif playerLevel >= 1475 and playerLevel <= 1499 then
+            return {NPC = "Forgotten Quest Giver 3", Enemy = "Toga Warrior", Level = 1475}
+        end
+    -- Third Sea Quests
+    elseif sea == "Third Sea" then
+        if playerLevel >= 1500 and playerLevel <= 1524 then
+            return {NPC = "Pirate Port Quest Giver", Enemy = "Pirate Millionaire", Level = 1500}
+        elseif playerLevel >= 1525 and playerLevel <= 1574 then
+            return {NPC = "Pirate Port Quest Giver 2", Enemy = "Pistol Billionaire", Level = 1525}
+        elseif playerLevel >= 1575 and playerLevel <= 1599 then
+            return {NPC = "Pirate Port Quest Giver 3", Enemy = "Dragon Crew Warrior", Level = 1575}
+        elseif playerLevel >= 1600 and playerLevel <= 1624 then
+            return {NPC = "Pirate Port Quest Giver 4", Enemy = "Dragon Crew Archer", Level = 1600}
+        elseif playerLevel >= 1625 and playerLevel <= 1649 then
+            return {NPC = "Hydra Quest Giver", Enemy = "Hydra Enforcer", Level = 1625}
+        elseif playerLevel >= 1650 and playerLevel <= 1674 then
+            return {NPC = "Hydra Quest Giver 2", Enemy = "Venomous Assailant", Level = 1650}
+        elseif playerLevel >= 1675 and playerLevel <= 1699 then
+            return {NPC = "Hydra Quest Giver 3", Enemy = "Hydra Commander", Level = 1675}
+        elseif playerLevel >= 1700 and playerLevel <= 1724 then
+            return {NPC = "Mansion Quest Giver", Enemy = "Mansion Guard", Level = 1700}
+        elseif playerLevel >= 1725 and playerLevel <= 1749 then
+            return {NPC = "Mansion Quest Giver 2", Enemy = "Mansion Head Guard", Level = 1725}
+        elseif playerLevel >= 1750 and playerLevel <= 1774 then
+            return {NPC = "Castle Quest Giver", Enemy = "Castle Guard", Level = 1750}
+        elseif playerLevel >= 1775 and playerLevel <= 1799 then
+            return {NPC = "Castle Quest Giver 2", Enemy = "Royal Guard", Level = 1775}
+        elseif playerLevel >= 1800 and playerLevel <= 1824 then
+            return {NPC = "Castle Quest Giver 3", Enemy = "Elite Royal Guard", Level = 1800}
+        elseif playerLevel >= 1825 and playerLevel <= 1849 then
+            return {NPC = "Turtle Quest Giver", Enemy = "Fishman Raider", Level = 1825}
+        elseif playerLevel >= 1850 and playerLevel <= 1874 then
+            return {NPC = "Turtle Quest Giver 2", Enemy = "Fishman Captain", Level = 1850}
+        elseif playerLevel >= 1875 and playerLevel <= 1899 then
+            return {NPC = "Turtle Quest Giver 3", Enemy = "Turtle Admiral", Level = 1875}
+        elseif playerLevel >= 1900 and playerLevel <= 1924 then
+            return {NPC = "Haunted Quest Giver", Enemy = "Reborn Pirate", Level = 1900}
+        elseif playerLevel >= 1925 and playerLevel <= 1949 then
+            return {NPC = "Haunted Quest Giver 2", Enemy = "Reborn Royal Guard", Level = 1925}
+        elseif playerLevel >= 1950 and playerLevel <= 1974 then
+            return {NPC = "Haunted Quest Giver 3", Enemy = "Reborn Elite Guard", Level = 1950}
+        elseif playerLevel >= 1975 and playerLevel <= 1999 then
+            return {NPC = "Haunted Quest Giver 4", Enemy = "Reborn Boss", Level = 1975}
+        elseif playerLevel >= 2000 and playerLevel <= 2024 then
+            return {NPC = "Sea Quest Giver", Enemy = "Sea Soldier", Level = 2000}
+        elseif playerLevel >= 2025 and playerLevel <= 2049 then
+            return {NPC = "Sea Quest Giver 2", Enemy = "Sea General", Level = 2025}
+        elseif playerLevel >= 2050 and playerLevel <= 2074 then
+            return {NPC = "Candy Quest Giver", Enemy = "Candy Pirate", Level = 2050}
+        elseif playerLevel >= 2075 and playerLevel <= 2099 then
+            return {NPC = "Candy Quest Giver 2", Enemy = "Candy Bandit", Level = 2075}
+        elseif playerLevel >= 2100 and playerLevel <= 2124 then
+            return {NPC = "Candy Quest Giver 3", Enemy = "Candy Rebel", Level = 2100}
+        elseif playerLevel >= 2125 and playerLevel <= 2149 then
+            return {NPC = "Cake Quest Giver", Enemy = "Baking Staff", Level = 2125}
+        elseif playerLevel >= 2150 and playerLevel <= 2174 then
+            return {NPC = "Cake Quest Giver 2", Enemy = "Head Baker", Level = 2150}
+        elseif playerLevel >= 2175 and playerLevel <= 2199 then
+            return {NPC = "Cake Quest Giver 3", Enemy = "Baking Manager", Level = 2175}
+        elseif playerLevel >= 2200 and playerLevel <= 2224 then
+            return {NPC = "Ice Cream Quest Giver", Enemy = "Ice Cream Pirate", Level = 2200}
+        elseif playerLevel >= 2225 and playerLevel <= 2249 then
+            return {NPC = "Ice Cream Quest Giver 2", Enemy = "Ice Cream Chef", Level = 2225}
+        elseif playerLevel >= 2250 and playerLevel <= 2274 then
+            return {NPC = "Ice Cream Quest Giver 3", Enemy = "Ice Cream Commander", Level = 2250}
+        elseif playerLevel >= 2275 and playerLevel <= 2299 then
+            return {NPC = "Peanut Quest Giver", Enemy = "Peanut Scout", Level = 2275}
+        elseif playerLevel >= 2300 and playerLevel <= 2324 then
+            return {NPC = "Peanut Quest Giver 2", Enemy = "Peanut Guard", Level = 2300}
+        elseif playerLevel >= 2325 and playerLevel <= 2349 then
+            return {NPC = "Peanut Quest Giver 3", Enemy = "Peanut General", Level = 2325}
+        elseif playerLevel >= 2350 and playerLevel <= 2374 then
+            return {NPC = "Labyrinth Quest Giver", Enemy = "Labyrinth Dweller", Level = 2350}
+        elseif playerLevel >= 2375 and playerLevel <= 2399 then
+            return {NPC = "Labyrinth Quest Giver 2", Enemy = "Labyrinth Guardian", Level = 2375}
+        elseif playerLevel >= 2400 and playerLevel <= 2424 then
+            return {NPC = "Labyrinth Quest Giver 3", Enemy = "Labyrinth Minotaur", Level = 2400}
+        elseif playerLevel >= 2425 and playerLevel <= 2449 then
+            return {NPC = "Tiki Quest Giver", Enemy = "Tiki Villager", Level = 2425}
+elseif playerLevel >= 2450 and playerLevel <= 2474 then
+            return {NPC = "Tiki Quest Giver 2", Enemy = "Tiki Warrior", Level = 2450}
+        elseif playerLevel >= 2475 and playerLevel <= 2499 then
+            return {NPC = "Tiki Quest Giver 3", Enemy = "Tiki Elite", Level = 2475}
+        elseif playerLevel >= 2500 and playerLevel <= 2524 then
+            return {NPC = "Tiki Quest Giver 4", Enemy = "Tiki Champion", Level = 2500}
+        elseif playerLevel >= 2525 and playerLevel <= 2549 then
+            return {NPC = "Tiki Quest Giver 5", Enemy = "Tiki General", Level = 2525}
+        elseif playerLevel >= 2550 and playerLevel <= 2574 then
+            return {NPC = "Tiki Quest Giver 6", Enemy = "Tiki Warlord", Level = 2550}
+        elseif playerLevel >= 2575 and playerLevel <= 2599 then
+            return {NPC = "Tiki Quest Giver 7", Enemy = "Tiki King", Level = 2575}
+        elseif playerLevel >= 2600 and playerLevel <= 2624 then
+            return {NPC = "Submerged Quest Giver", Enemy = "Coral Pirate", Level = 2600}
+        elseif playerLevel >= 2625 and playerLevel <= 2649 then
+            return {NPC = "Submerged Quest Giver 2", Enemy = "Sea Chanter", Level = 2625}
+        elseif playerLevel >= 2650 and playerLevel <= 2674 then
+            return {NPC = "Submerged Quest Giver 3", Enemy = "Ocean Prophet", Level = 2650}
+        elseif playerLevel >= 2675 and playerLevel <= 2699 then
+            return {NPC = "Submerged Quest Giver 4", Enemy = "High Disciple", Level = 2675}
+        elseif playerLevel >= 2700 and playerLevel <= 2724 then
+            return {NPC = "Submerged Quest Giver 5", Enemy = "Grand Devotee", Level = 2700}
+        elseif playerLevel >= 2725 and playerLevel <= 2749 then
+            return {NPC = "Submerged Quest Giver 6", Enemy = "Elder Sage", Level = 2725}
+        elseif playerLevel >= 2750 and playerLevel <= 2799 then
+            return {NPC = "Submerged Quest Giver 7", Enemy = "Mystic Oracle", Level = 2750}
+        elseif playerLevel >= 2800 and playerLevel <= 3000 then
+            return {NPC = "Secret Quest Giver", Enemy = "Secret Guardian", Level = 2800}
+        end
+    end
+
+    return nil
+end
+
+--// Accept Quest
+local function AcceptQuest(questData)
+    if not questData then return false end
+
+    local questNPC = Workspace.NPCs:FindFirstChild(questData.NPC)
+    if questNPC and questNPC:FindFirstChild("HumanoidRootPart") then
+        local distance = (RootPart.Position - questNPC.HumanoidRootPart.Position).Magnitude
+        if distance < 10 then
+            -- Simulate quest acceptance
+            game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("StartQuest", questData.NPC, questData.Level)
+            return true
+        end
+    end
+    return false
+end
+
+--// Attack Enemy
+local function AttackEnemy(enemy)
+    if not enemy or not enemy:FindFirstChild("HumanoidRootPart") then return end
+
+    -- Teleport to enemy
+    RootPart.CFrame = enemy.HumanoidRootPart.CFrame * CFrame.new(0, 0, 3)
+
+    -- Equip weapon
+    local tool = Character:FindFirstChildOfClass("Tool")
+    if not tool then
+        -- Try to equip selected weapon
+        for _, item in pairs(Player.Backpack:GetChildren()) do
+            if item:IsA("Tool") then
+                Humanoid:EquipTool(item)
+                break
+            end
+        end
+    end
+
+    -- Attack
+    if getgenv().Settings.FastAttack then
+        -- Fast attack method
+        for i = 1, 5 do
+            VirtualUser:CaptureController()
+            VirtualUser:Button1Down(Vector2.new(0, 0))
+            task.wait(0.1)
+            VirtualUser:Button1Up(Vector2.new(0, 0))
+        end
+    else
+        VirtualUser:CaptureController()
+        VirtualUser:Button1Down(Vector2.new(0, 0))
+        task.wait(0.3)
+        VirtualUser:Button1Up(Vector2.new(0, 0))
+    end
+
+    TotalKills = TotalKills + 1
+end
+
+--// Auto Farm Loop
+local function StartFarm()
+    if FarmConnection then FarmConnection:Disconnect() end
+
+    FarmConnection = RunService.Heartbeat:Connect(function()
+        if not getgenv().Settings.AutoFarm then return end
+
+        local playerLevel = GetPlayerLevel()
+        if playerLevel >= MAX_LEVEL then
+            Luna:Notification({
+                Title = "Max Level Reached!",
+                Content = "You have reached the maximum level: " .. MAX_LEVEL,
+                Time = 10
+            })
+            SendWebhook("Max Level Reached!", "Congratulations! You have reached level " .. MAX_LEVEL)
+            getgenv().Settings.AutoFarm = false
+            return
+        end
+
+        -- Get quest and enemy
+        local questData = GetQuestNPC()
+        if questData and getgenv().Settings.AutoQuest then
+            AcceptQuest(questData)
+        end
+
+        local enemy = GetClosestEnemy(playerLevel + 50)
+        if enemy then
+            CurrentTarget = enemy
+            AttackEnemy(enemy)
+        end
+    end)
+end
+
+local function StopFarm()
+    if FarmConnection then
+        FarmConnection:Disconnect()
+        FarmConnection = nil
+    end
+    CurrentTarget = nil
+end
+
+--// MAIN TAB UI
+MainTab:CreateSection("Main Settings")
+
+MainTab:CreateToggle({
+    Name = "Enable Auto Farm",
+    CurrentValue = false,
+    Flag = "AutoFarmToggle",
+    Callback = function(Value)
+        getgenv().Settings.AutoFarm = Value
+        if Value then
+            FarmStartTime = tick()
+            StartFarm()
+            Luna:Notification({
+                Title = "Auto Farm",
+                Content = "Started farming to level " .. MAX_LEVEL,
+                Time = 3
+            })
+        else
+            StopFarm()
+            Luna:Notification({
+                Title = "Auto Farm",
+                Content = "Stopped farming",
+                Time = 3
+            })
+        end
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "Auto Accept Quest",
+    CurrentValue = true,
+    Flag = "AutoQuestToggle",
+    Callback = function(Value)
+        getgenv().Settings.AutoQuest = Value
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "Fast Attack",
+    CurrentValue = true,
+    Flag = "FastAttackToggle",
+    Callback = function(Value)
+        getgenv().Settings.FastAttack = Value
+    end
+})
+
+MainTab:CreateSection("Player Info")
+
+MainTab:CreateLabel("Current Level: " .. GetPlayerLevel())
+MainTab:CreateLabel("Current Money: " .. GetPlayerMoney())
+MainTab:CreateLabel("Current Sea: " .. GetCurrentSea())
+MainTab:CreateLabel("Max Level: " .. MAX_LEVEL .. " (2800 + 200 Secret)")
+
+--// FARM TAB UI
+FarmTab:CreateSection("Farm Settings")
+
+FarmTab:CreateDropdown({
+    Name = "Farm Mode",
+    Options = {"Level", "Boss", "Mastery", "Chest"},
+    CurrentOption = "Level",
+    Flag = "FarmModeDropdown",
+    Callback = function(Option)
+        getgenv().Settings.FarmMode = Option
+    end
+})
+
+FarmTab:CreateDropdown({
+    Name = "Weapon Type",
+    Options = {"Melee", "Sword", "Fruit", "Gun"},
+    CurrentOption = "Melee",
+    Flag = "WeaponDropdown",
+    Callback = function(Option)
+        getgenv().Settings.SelectedWeapon = Option
+    end
+})
+
+FarmTab:CreateSlider({
+    Name = "Farm Radius",
+    Range = {10, 200},
+    Increment = 10,
+    Suffix = "studs",
+    CurrentValue = 50,
+    Flag = "FarmRadiusSlider",
+    Callback = function(Value)
+        getgenv().Settings.FarmRadius = Value
+    end
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto Collect Chests",
+    CurrentValue = false,
+    Flag = "AutoChestToggle",
+    Callback = function(Value)
+        getgenv().Settings.AutoCollectChests = Value
+        if Value then
+            task.spawn(function()
+                while getgenv().Settings.AutoCollectChests do
+                    task.wait(getgenv().Settings.ChestDelay)
+                    for _, chest in pairs(Workspace:GetChildren()) do
+                        if chest.Name:find("Chest") and chest:FindFirstChild("TouchInterest") then
+                            firetouchinterest(RootPart, chest.TouchInterest, 0)
+                            firetouchinterest(RootPart, chest.TouchInterest, 1)
+                        end
+                    end
+                end
+            end)
+        end
+    end
+})
+
+--// STATS TAB UI
+StatsTab:CreateSection("Auto Stats")
+
+StatsTab:CreateToggle({
+    Name = "Enable Auto Stats",
+    CurrentValue = false,
+    Flag = "AutoStatsToggle",
+    Callback = function(Value)
+        getgenv().Settings.AutoStats = Value
+        if Value then
+            task.spawn(function()
+                while getgenv().Settings.AutoStats do
+                    task.wait(1)
+                    local stats = {
+                        ["Melee"] = "1",
+                        ["Defense"] = "2",
+                        ["Sword"] = "3",
+                        ["Gun"] = "4",
+                        ["Blox Fruit"] = "5"
+                    }
+                    local stat = stats[getgenv().Settings.StatMode]
+                    if stat then
+                        game:GetService("ReplicatedStorage").Remotes.CommF_:InvokeServer("AddPoint", stat, 1)
+                    end
+                end
+            end)
+        end
+    end
+})
+
+StatsTab:CreateDropdown({
+    Name = "Stat Mode",
+    Options = {"Melee", "Defense", "Sword", "Gun", "Blox Fruit"},
+    CurrentOption = "Melee",
+    Flag = "StatModeDropdown",
+    Callback = function(Option)
+        getgenv().Settings.StatMode = Option
+    end
+})
+
+--// MISC TAB UI
+MiscTab:CreateSection("Safety")
+
+MiscTab:CreateToggle({
+    Name = "Anti-AFK",
+    CurrentValue = true,
+    Flag = "AntiAFKToggle",
+    Callback = function(Value)
+        getgenv().Settings.AntiAFK = Value
+    end
+})
+
+MiscTab:CreateToggle({
+    Name = "Auto Rejoin",
+    CurrentValue = true,
+    Flag = "AutoRejoinToggle",
+    Callback = function(Value)
+        getgenv().Settings.AutoRejoin = Value
+    end
+})
+
+MiscTab:CreateSlider({
+    Name = "Rejoin Delay",
+    Range = {60, 1800},
+    Increment = 60,
+    Suffix = "seconds",
+    CurrentValue = 300,
+    Flag = "RejoinDelaySlider",
+    Callback = function(Value)
+        getgenv().Settings.RejoinDelay = Value
+    end
+})
+
+MiscTab:CreateSection("Webhook")
+
+MiscTab:CreateToggle({
+    Name = "Enable Webhook",
+    CurrentValue = false,
+    Flag = "WebhookToggle",
+    Callback = function(Value)
+        getgenv().Settings.WebhookEnabled = Value
+    end
+})
+
+MiscTab:CreateInput({
+    Name = "Webhook URL",
+    PlaceholderText = "https://discord.com/api/webhooks/...",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        getgenv().Settings.WebhookURL = Text
+    end
+})
+
+MiscTab:CreateButton({
+    Name = "Send Test Webhook",
+    Callback = function()
+        SendWebhook("Test Webhook", "This is a test message from Blox Fruits Auto Farm")
+        Luna:Notification({
+            Title = "Webhook",
+            Content = "Test webhook sent!",
+            Time = 3
+        })
+    end
+})
+
+--// SECRET TAB UI
+SecretTab:CreateSection("Island Secrets (200 Secret Levels)")
+
+SecretTab:CreateToggle({
+    Name = "Track Secrets",
+    CurrentValue = true,
+    Flag = "TrackSecretsToggle",
+    Callback = function(Value)
+        getgenv().Settings.TrackSecrets = Value
+    end
+})
+
+SecretTab:CreateToggle({
+    Name = "Auto Secret Quest",
+    CurrentValue = false,
+    Flag = "AutoSecretToggle",
+    Callback = function(Value)
+        getgenv().Settings.AutoSecretQuest = Value
+    end
+})
+
+SecretTab:CreateLabel("Base Level Cap: 2800")
+SecretTab:CreateLabel("Secret Levels: +200")
+SecretTab:CreateLabel("Total Max Level: 3000")
+SecretTab:CreateLabel("Secrets Required: 40 Island Secrets")
+
+SecretTab:CreateButton({
+    Name = "Check Secret Progress",
+    Callback = function()
+        local playerLevel = GetPlayerLevel()
+        local secretsCompleted = math.max(0, playerLevel - BASE_LEVEL_CAP)
+        local secretsRemaining = SECRET_LEVELS - secretsCompleted
+
+        Luna:Notification({
+            Title = "Secret Progress",
+            Content = "Completed: " .. secretsCompleted .. "/" .. SECRET_LEVELS .. " | Remaining: " .. secretsRemaining,
+            Time = 5
+        })
+    end
+})
+
+--// Character Respawn Handler
+Player.CharacterAdded:Connect(function(newChar)
+    Character = newChar
+    Humanoid = newChar:WaitForChild("Humanoid")
+    RootPart = newChar:WaitForChild("HumanoidRootPart")
+
+    if getgenv().Settings.AutoFarm then
+        task.wait(2)
+        StartFarm()
+    end
+end)
+
+--// Level Change Detector
+local levelChanged = Player:WaitForChild("Data"):WaitForChild("Level")
+levelChanged.Changed:Connect(function(newLevel)
+    TotalLevels = TotalLevels + 1
+    if newLevel >= MAX_LEVEL then
+        SendWebhook("MAX LEVEL REACHED!", "You have reached the maximum level: " .. MAX_LEVEL)
+    elseif newLevel % 100 == 0 then
+        SendWebhook("Level Milestone", "Reached level " .. newLevel .. "/" .. MAX_LEVEL)
+    end
+end)
+
+--// Final Notification
+Luna:Notification({
+    Title = "Ready to Farm",
+    Content = "Auto Farm is ready! Toggle it in the Main tab.",
+    Image = "rbxassetid://7743878358",
+    Time = 5
+})
+
+print("========================================")
+print("  BLOX FRUITS AUTO FARM LOADED")
+print("  Max Level: " .. MAX_LEVEL)
+print("  UI: Luna Interface Suite")
+print("  Updated: September 11, 2026")
+print("========================================")
